@@ -1,17 +1,37 @@
-// Copyright 1998-2015 Epic Games, Inc. All Rights Reserved.
+   // Copyright 1998-2017 Epic Games, Inc. All Rights Reserved.
 
 #include "ShooterGame.h"
 #include "Weapons/ShooterWeapon.h"
 #include "Weapons/ShooterDamageType.h"
 #include "UI/ShooterHUD.h"
 #include "Online/ShooterPlayerState.h"
+#include "Animation/AnimMontage.h"
+#include "Animation/AnimInstance.h"
+#include "Sound/SoundNodeLocalPlayer.h"
+#include "AudioThread.h"
+
+static int32 NetVisualizeRelevancyTestPoints = 0;
+FAutoConsoleVariableRef CVarNetVisualizeRelevancyTestPoints(
+	TEXT("p.NetVisualizeRelevancyTestPoints"),
+	NetVisualizeRelevancyTestPoints,
+	TEXT("")
+	TEXT("0: Disable, 1: Enable"),
+	ECVF_Cheat);
 
 
-AShooterCharacter::AShooterCharacter(const FObjectInitializer& ObjectInitializer) 
+static int32 NetEnablePauseRelevancy = 1;
+FAutoConsoleVariableRef CVarNetEnablePauseRelevancy(
+	TEXT("p.NetEnablePauseRelevancy"),
+	NetEnablePauseRelevancy,
+	TEXT("")
+	TEXT("0: Disable, 1: Enable"),
+	ECVF_Cheat);
+
+AShooterCharacter::AShooterCharacter(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer.SetDefaultSubobjectClass<UShooterCharacterMovement>(ACharacter::CharacterMovementComponentName))
 {
 	Mesh1P = ObjectInitializer.CreateDefaultSubobject<USkeletalMeshComponent>(this, TEXT("PawnMesh1P"));
-	Mesh1P->AttachParent = GetCapsuleComponent();
+	Mesh1P->SetupAttachment(GetCapsuleComponent());
 	Mesh1P->bOnlyOwnerSee = true;
 	Mesh1P->bOwnerNoSee = false;
 	Mesh1P->bCastDynamicShadow = false;
@@ -39,7 +59,7 @@ AShooterCharacter::AShooterCharacter(const FObjectInitializer& ObjectInitializer
 	ThirdPersonCameraArm->TargetOffset = FVector(0.f, 0.f, 0.f);
 	ThirdPersonCameraArm->SetRelativeLocation(FVector(-40.f, 0.f, 160.f));
 	ThirdPersonCameraArm->SetRelativeRotation(FRotator(-10.f, 0.f, 0.f));
-	ThirdPersonCameraArm->AttachTo(GetMesh()); // attach it to the third person mesh
+	ThirdPersonCameraArm->SetupAttachment(GetMesh()); // attach it to the third person mesh
 	ThirdPersonCameraArm->TargetArmLength = 200.f;
 	ThirdPersonCameraArm->bEnableCameraLag = false;
 	ThirdPersonCameraArm->bEnableCameraRotationLag = false;
@@ -49,7 +69,7 @@ AShooterCharacter::AShooterCharacter(const FObjectInitializer& ObjectInitializer
 	ThirdPersonCameraArm->bInheritRoll = false;
 
 	ThirdPersonCamera = ObjectInitializer.CreateDefaultSubobject<UCameraComponent>(this, TEXT("ThirdPersonCamera"));
-	ThirdPersonCamera->AttachTo(ThirdPersonCameraArm, USpringArmComponent::SocketName);
+	ThirdPersonCamera->SetupAttachment(ThirdPersonCameraArm, USpringArmComponent::SocketName);
 	ThirdPersonCamera->bUsePawnControlRotation = false; // the arm is already doing the rotation
 	ThirdPersonCamera->FieldOfView = 90.f;
 
@@ -77,7 +97,7 @@ void AShooterCharacter::PostInitializeComponents()
 
 	// set initial mesh visibility (3rd person view)
 	UpdatePawnMeshes();
-	
+
 	// create material instance for setting team colors (3rd person view)
 	for (int32 iMat = 0; iMat < GetMesh()->GetNumMaterials(); iMat++)
 	{
@@ -159,9 +179,9 @@ bool AShooterCharacter::IsEnemyFor(AController* TestPC) const
 	AShooterPlayerState* MyPlayerState = Cast<AShooterPlayerState>(PlayerState);
 
 	bool bIsEnemy = true;
-	if (GetWorld()->GameState && GetWorld()->GameState->GameModeClass)
+	if (GetWorld()->GetGameState())
 	{
-		const AShooterGameMode* DefGame = GetWorld()->GameState->GameModeClass->GetDefaultObject<AShooterGameMode>();
+		const AShooterGameMode* DefGame = GetWorld()->GetGameState()->GetDefaultGameMode<AShooterGameMode>();
 		if (DefGame && MyPlayerState && TestPlayerState)
 		{
 			bIsEnemy = DefGame->CanDealDamage(TestPlayerState, MyPlayerState);
@@ -178,13 +198,13 @@ bool AShooterCharacter::IsEnemyFor(AController* TestPC) const
 void AShooterCharacter::UpdatePawnMeshes()
 {
 	bool const bFirstPerson = IsFirstPerson();
+	bFindCameraComponentWhenViewTarget = !bFirstPerson;
 
 	Mesh1P->MeshComponentUpdateFlag = !bFirstPerson ? EMeshComponentUpdateFlag::OnlyTickPoseWhenRendered : EMeshComponentUpdateFlag::AlwaysTickPoseAndRefreshBones;
 	Mesh1P->SetOwnerNoSee(!bFirstPerson);
-	bFindCameraComponentWhenViewTarget = !bFirstPerson;      
+
 	GetMesh()->MeshComponentUpdateFlag = bFirstPerson ? EMeshComponentUpdateFlag::OnlyTickPoseWhenRendered : EMeshComponentUpdateFlag::AlwaysTickPoseAndRefreshBones;
 	GetMesh()->SetOwnerNoSee(bFirstPerson);
-
 	if (CurrentWeapon)
 	{
 		CurrentWeapon->UpdateMeshes();
@@ -312,17 +332,18 @@ float AShooterCharacter::TakeDamage(float Damage, struct FDamageEvent const& Dam
 
 bool AShooterCharacter::CanDie(float KillingDamage, FDamageEvent const& DamageEvent, AController* Killer, AActor* DamageCauser) const
 {
-	if ( bIsDying										// already dying
+	if (bIsDying										// already dying
 		|| IsPendingKill()								// already destroyed
 		|| Role != ROLE_Authority						// not authority
-		|| GetWorld()->GetAuthGameMode() == NULL
-		|| GetWorld()->GetAuthGameMode()->GetMatchState() == MatchState::LeavingMap)	// level transition occurring
+		|| GetWorld()->GetAuthGameMode<AShooterGameMode>() == NULL
+		|| GetWorld()->GetAuthGameMode<AShooterGameMode>()->GetMatchState() == MatchState::LeavingMap)	// level transition occurring
 	{
 		return false;
 	}
 
 	return true;
 }
+
 
 
 bool AShooterCharacter::Die(float KillingDamage, FDamageEvent const& DamageEvent, AController* Killer, AActor* DamageCauser)
@@ -362,7 +383,7 @@ void AShooterCharacter::OnDeath(float KillingDamage, struct FDamageEvent const& 
 
 	if (Role == ROLE_Authority)
 	{
-		ReplicateHit(KillingDamage, DamageEvent, PawnInstigator, DamageCauser, true);	
+		ReplicateHit(KillingDamage, DamageEvent, PawnInstigator, DamageCauser, true);
 
 		// play the force feedback effect on the client player controller
 		APlayerController* PC = Cast<APlayerController>(Controller);
@@ -384,7 +405,7 @@ void AShooterCharacter::OnDeath(float KillingDamage, struct FDamageEvent const& 
 
 	// remove all weapons
 	DestroyInventory();
-	
+
 	// switch back to 3rd person view
 	UpdatePawnMeshes();
 
@@ -452,7 +473,7 @@ void AShooterCharacter::PlayHit(float DamageTaken, struct FDamageEvent const& Da
 	{
 		ApplyDamageMomentum(DamageTaken, DamageEvent, PawnInstigator, DamageCauser);
 	}
-	
+
 	AShooterPlayerController* MyPC = Cast<AShooterPlayerController>(Controller);
 	AShooterHUD* MyHUD = MyPC ? Cast<AShooterHUD>(MyPC->GetHUD()) : NULL;
 	if (MyHUD)
@@ -504,11 +525,11 @@ void AShooterCharacter::SetRagdollPhysics()
 		// hide and set short lifespan
 		TurnOff();
 		SetActorHiddenInGame(true);
-		SetLifeSpan( 1.0f );
+		SetLifeSpan(1.0f);
 	}
 	else
 	{
-		SetLifeSpan( 10.0f );
+		SetLifeSpan(10.0f);
 	}
 }
 
@@ -535,7 +556,7 @@ void AShooterCharacter::ReplicateHit(float Damage, struct FDamageEvent const& Da
 	LastTakeHitInfo.ActualDamage = Damage;
 	LastTakeHitInfo.PawnInstigator = Cast<AShooterCharacter>(PawnInstigator);
 	LastTakeHitInfo.DamageCauser = DamageCauser;
-	LastTakeHitInfo.SetDamageEvent(DamageEvent);		
+	LastTakeHitInfo.SetDamageEvent(DamageEvent);
 	LastTakeHitInfo.bKilled = bKilled;
 	LastTakeHitInfo.EnsureReplication();
 
@@ -571,7 +592,7 @@ void AShooterCharacter::SpawnDefaultInventory()
 		return;
 	}
 
-	int32 NumWeaponClasses = DefaultInventoryClasses.Num();	
+	int32 NumWeaponClasses = DefaultInventoryClasses.Num();
 	for (int32 i = 0; i < NumWeaponClasses; i++)
 	{
 		if (DefaultInventoryClasses[i])
@@ -673,7 +694,7 @@ void AShooterCharacter::OnRep_CurrentWeapon(AShooterWeapon* LastWeapon)
 void AShooterCharacter::SetCurrentWeapon(AShooterWeapon* NewWeapon, AShooterWeapon* LastWeapon)
 {
 	AShooterWeapon* LocalLastWeapon = NULL;
-	
+
 	if (LastWeapon != NULL)
 	{
 		LocalLastWeapon = LastWeapon;
@@ -821,7 +842,7 @@ void AShooterCharacter::UpdateRunSounds(bool bNewRunning)
 			{
 				RunLoopAC->bAutoDestroy = false;
 			}
-			
+
 		}
 		else if (RunLoopAC)
 		{
@@ -845,7 +866,7 @@ void AShooterCharacter::UpdateRunSounds(bool bNewRunning)
 //////////////////////////////////////////////////////////////////////////
 // Animations
 
-float AShooterCharacter::PlayAnimMontage(class UAnimMontage* AnimMontage, float InPlayRate, FName StartSectionName) 
+float AShooterCharacter::PlayAnimMontage(class UAnimMontage* AnimMontage, float InPlayRate, FName StartSectionName)
 {
 	USkeletalMeshComponent* UseMesh = GetPawnMesh();
 	if (AnimMontage && UseMesh && UseMesh->AnimScriptInstance)
@@ -862,7 +883,7 @@ void AShooterCharacter::StopAnimMontage(class UAnimMontage* AnimMontage)
 	if (AnimMontage && UseMesh && UseMesh->AnimScriptInstance &&
 		UseMesh->AnimScriptInstance->Montage_IsPlaying(AnimMontage))
 	{
-		UseMesh->AnimScriptInstance->Montage_Stop(AnimMontage->BlendOutTime);
+		UseMesh->AnimScriptInstance->Montage_Stop(AnimMontage->BlendOut.GetBlendTime(), AnimMontage);
 	}
 }
 
@@ -879,7 +900,7 @@ void AShooterCharacter::StopAllAnimMontages()
 //////////////////////////////////////////////////////////////////////////
 // Input
 
-void AShooterCharacter::SetupPlayerInputComponent(class UInputComponent* InputComponent)
+void AShooterCharacter::SetupPlayerInputComponent(class UInputComponent* PlayerInputComponent)
 {
 	check(InputComponent);
 	InputComponent->BindAxis("MoveForward", this, &AShooterCharacter::MoveForward);
@@ -921,7 +942,7 @@ void AShooterCharacter::MoveForward(float Val)
 		// Limit pitch when walking or falling
 		const bool bLimitRotation = (GetCharacterMovement()->IsMovingOnGround() || GetCharacterMovement()->IsFalling());
 		const FRotator Rotation = bLimitRotation ? GetActorRotation() : Controller->GetControlRotation();
-		const FVector Direction = FRotationMatrix(Rotation).GetScaledAxis( EAxis::X );
+		const FVector Direction = FRotationMatrix(Rotation).GetScaledAxis(EAxis::X);
 		AddMovementInput(Direction, Val);
 	}
 }
@@ -931,7 +952,7 @@ void AShooterCharacter::MoveRight(float Val)
 	if (Val != 0.f)
 	{
 		const FQuat Rotation = GetActorQuat();
-		const FVector Direction = FQuatRotationMatrix(Rotation).GetScaledAxis( EAxis::Y );
+		const FVector Direction = FQuatRotationMatrix(Rotation).GetScaledAxis(EAxis::Y);
 		AddMovementInput(Direction, Val);
 	}
 }
@@ -1072,12 +1093,12 @@ void AShooterCharacter::OnStopRunning()
 }
 
 bool AShooterCharacter::IsRunning() const
-{	
+{
 	if (!GetCharacterMovement())
 	{
 		return false;
 	}
-	
+
 	return (bWantsToRun || bWantsToRunToggled) && !GetVelocity().IsZero() && (GetVelocity().GetSafeNormal2D() | GetActorForwardVector()) > -0.1;
 }
 
@@ -1117,14 +1138,14 @@ void AShooterCharacter::Tick(float DeltaSeconds)
 	{
 		if (this->Health < this->GetMaxHealth())
 		{
-			this->Health +=  5 * DeltaSeconds;
+			this->Health += 5 * DeltaSeconds;
 			if (Health > this->GetMaxHealth())
 			{
 				Health = this->GetMaxHealth();
 			}
 		}
 	}
-	
+
 	if (LowHealthSound && GEngine->UseSound())
 	{
 		if ((this->Health > 0 && this->Health < this->GetMaxHealth() * LowHealthPercentage) && (!LowHealthWarningPlayer || !LowHealthWarningPlayer->IsPlaying()))
@@ -1132,7 +1153,7 @@ void AShooterCharacter::Tick(float DeltaSeconds)
 			LowHealthWarningPlayer = UGameplayStatics::SpawnSoundAttached(LowHealthSound, GetRootComponent(),
 				NAME_None, FVector(ForceInit), EAttachLocation::KeepRelativeOffset, true);
 			LowHealthWarningPlayer->SetVolumeMultiplier(0.0f);
-		} 
+		}
 		else if ((this->Health > this->GetMaxHealth() * LowHealthPercentage || this->Health < 0) && LowHealthWarningPlayer && LowHealthWarningPlayer->IsPlaying())
 		{
 			LowHealthWarningPlayer->Stop();
@@ -1163,30 +1184,30 @@ void AShooterCharacter::OnStopJump()
 //////////////////////////////////////////////////////////////////////////
 // Replication
 
-void AShooterCharacter::PreReplication( IRepChangedPropertyTracker & ChangedPropertyTracker )
+void AShooterCharacter::PreReplication(IRepChangedPropertyTracker & ChangedPropertyTracker)
 {
-	Super::PreReplication( ChangedPropertyTracker );
+	Super::PreReplication(ChangedPropertyTracker);
 
 	// Only replicate this property for a short duration after it changes so join in progress players don't get spammed with fx when joining late
-	DOREPLIFETIME_ACTIVE_OVERRIDE( AShooterCharacter, LastTakeHitInfo, GetWorld() && GetWorld()->GetTimeSeconds() < LastTakeHitTimeTimeout );
+	DOREPLIFETIME_ACTIVE_OVERRIDE(AShooterCharacter, LastTakeHitInfo, GetWorld() && GetWorld()->GetTimeSeconds() < LastTakeHitTimeTimeout);
 }
 
-void AShooterCharacter::GetLifetimeReplicatedProps( TArray< FLifetimeProperty > & OutLifetimeProps ) const
+void AShooterCharacter::GetLifetimeReplicatedProps(TArray< FLifetimeProperty > & OutLifetimeProps) const
 {
-	Super::GetLifetimeReplicatedProps( OutLifetimeProps );
+	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
 
 	// only to local owner: weapon change requests are locally instigated, other clients don't need it
-	DOREPLIFETIME_CONDITION( AShooterCharacter, Inventory,			COND_OwnerOnly );
+	DOREPLIFETIME_CONDITION(AShooterCharacter, Inventory, COND_OwnerOnly);
 
 	// everyone except local owner: flag change is locally instigated
-	DOREPLIFETIME_CONDITION( AShooterCharacter, bIsTargeting,		COND_SkipOwner );
-	DOREPLIFETIME_CONDITION( AShooterCharacter, bWantsToRun,		COND_SkipOwner );
+	DOREPLIFETIME_CONDITION(AShooterCharacter, bIsTargeting, COND_SkipOwner);
+	DOREPLIFETIME_CONDITION(AShooterCharacter, bWantsToRun, COND_SkipOwner);
 
-	DOREPLIFETIME_CONDITION( AShooterCharacter, LastTakeHitInfo,	COND_Custom );
+	DOREPLIFETIME_CONDITION(AShooterCharacter, LastTakeHitInfo, COND_Custom);
 
 	// everyone
-	DOREPLIFETIME( AShooterCharacter, CurrentWeapon );
-	DOREPLIFETIME( AShooterCharacter, Health );
+	DOREPLIFETIME(AShooterCharacter, CurrentWeapon);
+	DOREPLIFETIME(AShooterCharacter, Health);
 }
 
 AShooterWeapon* AShooterCharacter::GetWeapon() const
@@ -1209,9 +1230,9 @@ USkeletalMeshComponent* AShooterCharacter::GetPawnMesh() const
 	return IsFirstPerson() ? Mesh1P : GetMesh();
 }
 
-USkeletalMeshComponent* AShooterCharacter::GetSpecifcPawnMesh( bool WantFirstPerson ) const
+USkeletalMeshComponent* AShooterCharacter::GetSpecifcPawnMesh(bool WantFirstPerson) const
 {
-	return WantFirstPerson == true  ? Mesh1P : GetMesh();
+	return WantFirstPerson == true ? Mesh1P : GetMesh();
 }
 
 FName AShooterCharacter::GetWeaponAttachPoint() const
